@@ -57,6 +57,7 @@ if is_vllm_available():
         destroy_distributed_environment,
         destroy_model_parallel,
     )
+    from vllm.lora.request import LoRARequest
     from vllm.transformers_utils.tokenizer import get_tokenizer
     from vllm.v1.engine.async_llm import AsyncEngineArgs, AsyncLLM
 
@@ -73,6 +74,7 @@ else:
     get_tokenizer = None
     ray = None
     distribute = None
+    LoRARequest = None
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -105,6 +107,8 @@ class VLLMModelConfig(ModelConfig):
     max_num_batched_tokens: PositiveInt = 2048  # maximum number of tokens per batch
     subfolder: str | None = None
     is_async: bool = False  # Whether to use the async version or sync version of the model
+    enable_lora: bool = False  # Whether to enable LoRA support
+    lora_modules: Optional[str] = None  # Comma-separated list of LoRA modules in the format name=path
 
 
 class VLLMModel(LightevalModel):
@@ -134,6 +138,7 @@ class VLLMModel(LightevalModel):
 
         self.model_info = ModelInfo(model_name=self.model_name, model_sha=self.model_sha)
         self.pairwise_tokenization = config.pairwise_tokenization
+        self.lora_modules = None
 
     @property
     def tokenizer(self):
@@ -188,6 +193,15 @@ class VLLMModel(LightevalModel):
             "max_num_seqs": int(config.max_num_seqs),
             "max_num_batched_tokens": int(config.max_num_batched_tokens),
         }
+        if config.enable_lora:
+            self.model_args["enable_lora"] = True
+            self.model_args["max_loras"] = len(config.lora_modules.split(",")) if config.lora_modules else 1
+            self.model_args["max_lora_rank"] = 64
+            if not config.lora_modules:
+                logger.warning(
+                    "enable_lora is True, but no lora_modules specified. This is okay if LoRAs are loaded dynamically."
+                )
+            self.lora_modules = config.lora_modules
 
         if config.quantization is not None:
             self.model_args["quantization"] = config.quantization
@@ -370,10 +384,13 @@ class VLLMModel(LightevalModel):
                 if x is not None
             ]
         else:
+            lora_request = LoRARequest("lora_adapter", 1, self.lora_modules) if self.lora_modules else None
+            print(f"lora_request: {lora_request}")
             outputs = self.model.generate(
                 prompt_token_ids=inputs,
                 sampling_params=sampling_params,
                 use_tqdm=True,
+                lora_request=lora_request if self.lora_modules else None,
             )
 
         return outputs

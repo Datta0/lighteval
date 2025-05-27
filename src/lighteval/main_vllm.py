@@ -29,6 +29,7 @@ HELP_PANEL_NAME_1 = "Common Parameters"
 HELP_PANEL_NAME_2 = "Logging Parameters"
 HELP_PANEL_NAME_3 = "Debug Parameters"
 HELP_PANEL_NAME_4 = "Modeling Parameters"
+HELP_PANEL_NAME_LORA = "LoRA Parameters"
 
 
 def vllm(
@@ -44,6 +45,14 @@ def vllm(
     use_chat_template: Annotated[
         bool, Option(help="Use chat template for evaluation.", rich_help_panel=HELP_PANEL_NAME_4)
     ] = False,
+    enable_lora: Annotated[bool, Option(help="Enable LoRA adapters.", rich_help_panel=HELP_PANEL_NAME_LORA)] = False,
+    lora_modules: Annotated[
+        Optional[str],
+        Option(
+            help="Comma-separated list of LoRA modules in the format name=path. Example: 'sql_adapter=/path/to/sql_lora,other_adapter=/path/to/other'",
+            rich_help_panel=HELP_PANEL_NAME_LORA,
+        ),
+    ] = None,
     system_prompt: Annotated[
         Optional[str], Option(help="Use system prompt for evaluation.", rich_help_panel=HELP_PANEL_NAME_4)
     ] = None,
@@ -143,6 +152,17 @@ def vllm(
     else:
         metric_options = {}
         model_config = VLLMModelConfig.from_args(model_args)
+
+    # Update model_config with LoRA parameters if provided
+    if enable_lora:
+        model_config.enable_lora = True
+        if lora_modules:
+            model_config.lora_modules = lora_modules
+        elif (
+            not model_config.lora_modules
+        ):  # if enable_lora is true but no lora_modules passed via CLI and not in yaml
+            # This will use the warning in VLLMModelConfig if lora_modules is still None
+            pass
 
     pipeline = Pipeline(
         tasks=tasks,
