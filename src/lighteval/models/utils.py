@@ -48,7 +48,10 @@ class ModelConfig(BaseModel, extra="forbid"):
     @classmethod
     def from_args(cls, args: str):
         config = cls._parse_args(args)
-        return cls(**config)
+        # Filter out keys not in the model fields
+        allowed_fields = set(cls.model_fields.keys())
+        filtered_config = {k: v for k, v in config.items() if k in allowed_fields}
+        return cls(**filtered_config)
 
     @staticmethod
     def _parse_args(args: str) -> dict:
@@ -90,7 +93,8 @@ class ModelConfig(BaseModel, extra="forbid"):
         for key, value in matches:
             key = key.strip()
             if key == "generation_parameters":
-                gen_params = re.sub(r"(\w+):", r'"\1":', value)
+                gen_params = value.replace("'", '"')
+                gen_params = re.sub(r"(\w+):", r'"\1":', gen_params)
                 generation_parameters_dict = json.loads(gen_params)
 
         args = re.sub(r"generation_parameters=\{.*?\},?", "", args).strip(",")
@@ -98,6 +102,10 @@ class ModelConfig(BaseModel, extra="forbid"):
 
         if generation_parameters_dict is not None:
             model_config["generation_parameters"] = generation_parameters_dict
+
+        # Remap 'pretrained' to 'model_name' for compatibility with VLLMModelConfig
+        if "pretrained" in model_config:
+            model_config["model_name"] = model_config.pop("pretrained")
 
         return model_config
 

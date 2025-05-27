@@ -57,6 +57,7 @@ if is_vllm_available():
         destroy_distributed_environment,
         destroy_model_parallel,
     )
+    from vllm.lora.request import LoRARequest
     from vllm.transformers_utils.tokenizer import get_tokenizer
     from vllm.v1.engine.async_llm import AsyncEngineArgs, AsyncLLM
 
@@ -73,6 +74,7 @@ else:
     get_tokenizer = None
     ray = None
     distribute = None
+    LoRARequest = None
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -105,6 +107,8 @@ class VLLMModelConfig(ModelConfig):
     max_num_batched_tokens: PositiveInt = 2048  # maximum number of tokens per batch
     subfolder: str | None = None
     is_async: bool = False  # Whether to use the async version or sync version of the model
+    enable_lora: bool = False  # Whether to enable LoRA support
+    lora_modules: Optional[str] = None  # Comma-separated list of LoRA modules in the format name=path
 
 
 class VLLMModel(LightevalModel):
@@ -134,6 +138,9 @@ class VLLMModel(LightevalModel):
 
         self.model_info = ModelInfo(model_name=self.model_name, model_sha=self.model_sha)
         self.pairwise_tokenization = config.pairwise_tokenization
+        self.lora_modules = None
+        sampling_params = SamplingParams(**self._config.generation_parameters.to_vllm_dict())
+        print(f"sampling_params: {sampling_params}")
 
     @property
     def tokenizer(self):
@@ -188,6 +195,17 @@ class VLLMModel(LightevalModel):
             "max_num_seqs": int(config.max_num_seqs),
             "max_num_batched_tokens": int(config.max_num_batched_tokens),
         }
+        if config.enable_lora:
+            self.model_args["enable_lora"] = True
+            self.model_args["max_loras"] = len(config.lora_modules.split(",")) if config.lora_modules else 1
+            self.model_args["max_lora_rank"] = 64
+            if not config.lora_modules:
+                logger.warning(
+                    "enable_lora is True, but no lora_modules specified. This is okay if LoRAs are loaded dynamically."
+                )
+            self.lora_modules = config.lora_modules
+            self.lora_request = LoRARequest("lora_adapter", 1, self.lora_modules) if self.lora_modules else None
+            print(f"lora_request: {self.lora_request}")
 
         if config.quantization is not None:
             self.model_args["quantization"] = config.quantization
@@ -353,7 +371,9 @@ class VLLMModel(LightevalModel):
             @ray.remote(num_gpus=1 if self.tensor_parallel_size == 1 else None)
             def run_inference_one_model(model_args: dict, sampling_params: SamplingParams, requests):
                 llm = LLM(**model_args)
-                return llm.generate(prompt_token_ids=requests, sampling_params=sampling_params)
+                return llm.generate(
+                    prompt_token_ids=requests, sampling_params=sampling_params, lora_request=self.lora_request
+                )
 
             # dispatch requests to all self.data_parallel_size workers, in interleaved fashion
             # interleaved important to balance context lengths across workers
@@ -370,10 +390,12 @@ class VLLMModel(LightevalModel):
                 if x is not None
             ]
         else:
+            print(f"lora_request: {self.lora_request}")
             outputs = self.model.generate(
                 prompt_token_ids=inputs,
                 sampling_params=sampling_params,
                 use_tqdm=True,
+                lora_request=self.lora_request if self.lora_modules else None,
             )
 
         return outputs
@@ -506,7 +528,9 @@ class AsyncVLLMModel(VLLMModel):
             prompt = request.context
             index = f"generative_{index}"
 
-        generator = self.model.generate(request_id=str(index), prompt=prompt, sampling_params=sampling_params)
+        generator = self.model.generate(
+            request_id=str(index), prompt=prompt, sampling_params=sampling_params, lora_request=self.lora_request
+        )
         try:
             while output := await anext(generator):
                 continue
